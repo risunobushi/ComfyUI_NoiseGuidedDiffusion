@@ -1,3 +1,4 @@
+# noise_guided_diffusion.py
 import torch
 import numpy as np
 import cv2
@@ -8,7 +9,7 @@ class NoiseGuidedDiffusion:
     def INPUT_TYPES(s):
         return {"required": {
             "model": ("MODEL",),
-            "image": ("IMAGE",),  # Added input image for detail detection
+            "image": ("IMAGE",),
             "noise_type": (["perlin", "voronoi", "simplex", "white"],),
             "noise_scale": ("FLOAT", {
                 "default": 1.0,
@@ -28,17 +29,17 @@ class NoiseGuidedDiffusion:
                 "max": 5.0,
                 "step": 0.1
             }),
-            "black_level": ("FLOAT", {
-                "default": 0.0,
-                "min": 0.0,
-                "max": 1.0,
-                "step": 0.01
+            "black_level": ("INT", {
+                "default": 0,
+                "min": 0,
+                "max": 255,
+                "step": 1
             }),
-            "white_level": ("FLOAT", {
-                "default": 1.0,
-                "min": 0.0,
-                "max": 1.0,
-                "step": 0.01
+            "white_level": ("INT", {
+                "default": 255,
+                "min": 0,
+                "max": 255,
+                "step": 1
             }),
             "octaves": ("INT", {
                 "default": 3,
@@ -57,7 +58,7 @@ class NoiseGuidedDiffusion:
     RETURN_NAMES = ("model", "noise_preview", "detail_mask",)
     FUNCTION = "apply"
     CATEGORY = "sampling"
-
+    
     def __init__(self):
         self.noise_map = None
         self.detail_mask = None
@@ -75,9 +76,12 @@ class NoiseGuidedDiffusion:
             image = image.cpu().numpy()
             image = (image[0].transpose(1, 2, 0) * 255).astype(np.uint8)
 
-        # Convert to grayscale if needed
+        # Check number of channels and convert to grayscale
         if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            if image.shape[2] == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            else:  # Handle single channel case
+                gray = image[:, :, 0]
         else:
             gray = image
 
@@ -99,12 +103,79 @@ class NoiseGuidedDiffusion:
         
         return detail_mask
 
+    def generate_perlin_noise(self, h, w):
+        x = np.linspace(0, self.current_freq, w)
+        y = np.linspace(0, self.current_freq, h)
+        xx, yy = np.meshgrid(x, y)
+        
+        noise = np.zeros((h, w))
+        amplitude = 1.0
+        frequency = 1.0
+        
+        for _ in range(self.current_octaves):
+            phase_x = np.random.rand() * 100
+            phase_y = np.random.rand() * 100
+            noise += amplitude * np.sin(2 * np.pi * (xx * frequency + phase_x)) * \
+                    np.sin(2 * np.pi * (yy * frequency + phase_y))
+            amplitude *= 0.5
+            frequency *= 2
+        
+        return noise
+
+    def generate_voronoi_noise(self, h, w):
+        # Generate random points
+        num_points = int(max(h, w) * self.current_freq / 2)
+        points = np.random.rand(num_points, 2)
+        points[:, 0] *= w
+        points[:, 1] *= h
+        
+        # Create coordinate grids
+        x, y = np.meshgrid(np.arange(w), np.arange(h))
+        noise = np.zeros((h, w))
+        
+        # Calculate distances to nearest points
+        for px, py in points:
+            dist = np.sqrt((x - px)**2 + (y - py)**2)
+            noise = np.maximum(noise, 1 / (1 + dist * 0.1 * self.current_freq))
+        
+        return noise
+
+    def generate_simplex_noise(self, h, w):
+        # Simple approximation of simplex-like noise
+        noise = np.zeros((h, w))
+        scale = self.current_freq * 0.1
+        
+        for octave in range(self.current_octaves):
+            freq = (2 ** octave) * scale
+            amplitude = 0.5 ** octave
+            
+            # Generate base noise
+            x = np.linspace(0, w * freq, w)
+            y = np.linspace(0, h * freq, h)
+            xx, yy = np.meshgrid(x, y)
+            
+            # Add rotated waves
+            angles = np.linspace(0, np.pi, 3)
+            for angle in angles:
+                rotated_x = xx * np.cos(angle) - yy * np.sin(angle)
+                rotated_y = xx * np.sin(angle) + yy * np.cos(angle)
+                noise += amplitude * np.sin(rotated_x + rotated_y)
+        
+        return noise
+
+    def generate_white_noise(self, h, w):
+        return np.random.rand(h, w)
+
     def apply_levels(self, noise):
+        # Convert levels from 0-255 to 0-1 range
+        black_level = self.black_level / 255.0
+        white_level = self.white_level / 255.0
+        
         # Clip the noise to the specified black and white levels
-        noise = np.clip(noise, self.black_level, self.white_level)
+        noise = np.clip(noise, black_level, white_level)
         # Renormalize to full range
-        if self.white_level > self.black_level:
-            noise = (noise - self.black_level) / (self.white_level - self.black_level)
+        if white_level > black_level:
+            noise = (noise - black_level) / (white_level - black_level)
         return noise
 
     def generate_noise_map(self, shape, detail_mask=None):
@@ -126,7 +197,7 @@ class NoiseGuidedDiffusion:
         
         if detail_mask is not None:
             # Adjust noise frequency based on detail mask
-            high_freq_noise = self.generate_noise_map((1, 1, h, w))
+            high_freq_noise = self.generate_white_noise(h, w)  # Changed to direct white noise
             low_freq_noise = cv2.GaussianBlur(base_noise, (0, 0), sigmaX=3)
             
             # Combine noises based on detail mask
@@ -207,7 +278,7 @@ class NoiseGuidedDiffusion:
         modified_threshold = base_threshold + self.noise_map * (1 - base_threshold)
         
         return (denoise_mask >= modified_threshold).to(denoise_mask.dtype)
-        
+
 NODE_CLASS_MAPPINGS = {
     "NoiseGuidedDiffusion": NoiseGuidedDiffusion,
 }

@@ -116,9 +116,9 @@ class NoiseGuidedDiffusion:
     def generate_white_noise(self, h, w):
         return np.random.rand(h, w)
 
-    def generate_noise_map(self, h, w):
+    def generate_noise_map(self, h, w, device):
         np.random.seed(self.current_seed)
-        
+    
         if self.current_type == "perlin":
             noise = self.generate_perlin_noise(h, w)
         elif self.current_type == "voronoi":
@@ -126,20 +126,21 @@ class NoiseGuidedDiffusion:
         elif self.current_type == "simplex":
             noise = self.generate_simplex_noise(h, w)
         else:  # white noise
-            noise = self.generate_white_noise(h, w)
+           noise = self.generate_white_noise(h, w)
 
         # Normalize to [0, 1] range
         noise = (noise - noise.min()) / (noise.max() - noise.min())
-        
+    
         # Apply scale factor
         noise = noise * self.current_scale
-        
-        # Convert to torch tensor with BCHW format
+    
+        # Convert to torch tensor with BCHW format and move to correct device
         noise_map = torch.from_numpy(noise).float()
         noise_map = noise_map.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
-        
-        return noise_map
+        noise_map = noise_map.to(device)
     
+        return noise_map
+
     def apply(self, model, noise_type, width, height, noise_scale, noise_frequency, octaves, seed):
         model = model.clone()
         self.current_seed = seed
@@ -147,49 +148,38 @@ class NoiseGuidedDiffusion:
         self.current_freq = noise_frequency
         self.current_type = noise_type
         self.current_octaves = octaves
-        
+    
+        # Use default device for preview
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
         # Generate noise map at specified dimensions
-        preview_noise = self.generate_noise_map(height, width)
-        
-        # Determine device
-        try:
-            if hasattr(model, 'model') and hasattr(model.model, 'device'):
-                device = model.model.device
-            elif hasattr(model, 'inner_model') and hasattr(model.inner_model, 'device'):
-                device = model.inner_model.device
-            else:
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        except:
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # Move preview noise to the appropriate device
-        preview_noise = preview_noise.to(device)
-        
+        preview_noise = self.generate_noise_map(height, width, device)
+    
         model.set_model_denoise_mask_function(self.forward)
         return (model, preview_noise)
 
     def forward(self, sigma: torch.Tensor, denoise_mask: torch.Tensor, extra_options: dict):
         model = extra_options["model"]
         step_sigmas = extra_options["sigmas"]
-        
+    
+        # Always use the device from the input tensor
         if (self.noise_map is None or 
             self.noise_map.shape != denoise_mask.shape):
-            h, w = denoise_mask.shape[2:]  # Get height and width from denoise_mask
-            self.noise_map = self.generate_noise_map(h, w)
-            self.noise_map = self.noise_map.to(device=denoise_mask.device)
-        
+            h, w = denoise_mask.shape[2:]
+            self.noise_map = self.generate_noise_map(h, w, denoise_mask.device)
+    
         sigma_to = model.inner_model.model_sampling.sigma_min
         if step_sigmas[-1] > sigma_to:
             sigma_to = step_sigmas[-1]
         sigma_from = step_sigmas[0]
-        
+    
         ts_from = model.inner_model.model_sampling.timestep(sigma_from)
         ts_to = model.inner_model.model_sampling.timestep(sigma_to)
         current_ts = model.inner_model.model_sampling.timestep(sigma[0])
-        
+    
         base_threshold = (current_ts - ts_to) / (ts_from - ts_to)
         modified_threshold = base_threshold + self.noise_map * (1 - base_threshold)
-        
+    
         return (denoise_mask >= modified_threshold).to(denoise_mask.dtype)
 
 NODE_CLASS_MAPPINGS = {

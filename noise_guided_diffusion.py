@@ -33,13 +33,13 @@ class NoiseGuidedDiffusion:
                 "max": 5.0,
                 "step": 0.1
             }),
-            "black_level": ("INT", {
+            "inverted_white_level": ("INT", {
                 "default": 0,
                 "min": 0,
                 "max": 255,
                 "step": 1
             }),
-            "white_level": ("INT", {
+            "inverted_black_level": ("INT", {
                 "default": 255,
                 "min": 0,
                 "max": 255,

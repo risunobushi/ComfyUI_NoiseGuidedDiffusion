@@ -142,7 +142,7 @@ class NoiseGuidedDiffusion:
             noise = np.maximum(noise, 1 / (1 + dist * 0.1 * self.current_freq))
         
         return noise
-
+        
     def generate_simplex_noise(self, h, w):
         # Simple approximation of simplex-like noise
         noise = np.zeros((h, w))
@@ -208,7 +208,7 @@ class NoiseGuidedDiffusion:
         if detail_mask is not None:
             # Ensure detail mask matches noise dimensions
             if detail_mask.shape != (h, w):
-                detail_mask = cv2.resize(detail_mask, (w, h))
+                detail_mask = cv2.resize(detail_mask, (w, h), interpolation=cv2.INTER_LINEAR)
                 
             # Adjust noise frequency based on detail mask
             high_freq_noise = self.generate_white_noise(h, w)
@@ -257,10 +257,8 @@ class NoiseGuidedDiffusion:
         # Ensure detail mask has correct dimensions (BCHW)
         self.detail_mask = self.detail_mask.unsqueeze(0).unsqueeze(0)
         
-        # Generate preview noise map with detail mask
-        # Use the actual image dimensions for the preview
-        preview_shape = image.shape
-        preview_noise = self.generate_noise_map(preview_shape, detail_mask)
+        # Generate preview noise map with detail mask using the actual image dimensions
+        preview_noise = self.generate_noise_map(image.shape, detail_mask)
         
         try:
             if hasattr(model, 'model') and hasattr(model.model, 'device'):

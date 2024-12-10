@@ -1,4 +1,5 @@
 # noise_guided_diffusion.py
+
 import torch
 import numpy as np
 import cv2
@@ -74,7 +75,9 @@ class NoiseGuidedDiffusion:
         # Convert from torch tensor to numpy array
         if isinstance(image, torch.Tensor):
             image = image.cpu().numpy()
-            image = (image[0].transpose(1, 2, 0) * 255).astype(np.uint8)
+            image = (image[0] * 255).astype(np.uint8)  # Remove transpose, keep CHW format
+            # Move channels to last dimension for OpenCV
+            image = np.transpose(image, (1, 2, 0))
 
         # Check number of channels and convert to grayscale
         if len(image.shape) == 3:
@@ -180,7 +183,14 @@ class NoiseGuidedDiffusion:
 
     def generate_noise_map(self, shape, detail_mask=None):
         np.random.seed(self.current_seed)
-        h, w = shape[-2:]
+        
+        # Get height and width from shape, accounting for batch and channel dimensions
+        if len(shape) == 4:  # BCHW format
+            h, w = shape[2], shape[3]
+        elif len(shape) == 3:  # CHW format
+            h, w = shape[1], shape[2]
+        else:  # HW format
+            h, w = shape
         
         base_noise = None
         if self.current_type == "perlin":
@@ -196,8 +206,12 @@ class NoiseGuidedDiffusion:
         base_noise = (base_noise - base_noise.min()) / (base_noise.max() - base_noise.min())
         
         if detail_mask is not None:
+            # Ensure detail mask matches noise dimensions
+            if detail_mask.shape != (h, w):
+                detail_mask = cv2.resize(detail_mask, (w, h))
+                
             # Adjust noise frequency based on detail mask
-            high_freq_noise = self.generate_white_noise(h, w)  # Changed to direct white noise
+            high_freq_noise = self.generate_white_noise(h, w)
             low_freq_noise = cv2.GaussianBlur(base_noise, (0, 0), sigmaX=3)
             
             # Combine noises based on detail mask
@@ -209,11 +223,16 @@ class NoiseGuidedDiffusion:
         # Apply scale factor
         base_noise = base_noise * self.current_scale
         
-        # Convert to torch tensor
+        # Convert to torch tensor and reshape to match input shape
         noise_map = torch.from_numpy(base_noise).float()
-        if len(shape) > 2:
+        
+        # Add dimensions to match input shape
+        if len(shape) == 4:  # BCHW format
             noise_map = noise_map.unsqueeze(0).unsqueeze(0)
-            noise_map = noise_map.expand(shape)
+            noise_map = noise_map.expand(shape[0], shape[1], h, w)
+        elif len(shape) == 3:  # CHW format
+            noise_map = noise_map.unsqueeze(0)
+            noise_map = noise_map.expand(shape[0], h, w)
         
         return noise_map
 
@@ -228,15 +247,19 @@ class NoiseGuidedDiffusion:
         self.black_level = black_level
         self.white_level = white_level
         
-        # Generate detail mask
+        # Generate detail mask using the actual image dimensions
         detail_mask = self.get_detail_mask(image)
         detail_mask = np.power(detail_mask, detail_strength)  # Adjust strength
         
         # Store detail mask for later use
-        self.detail_mask = torch.from_numpy(detail_mask).float().unsqueeze(0).unsqueeze(0)
+        self.detail_mask = torch.from_numpy(detail_mask).float()
+        
+        # Ensure detail mask has correct dimensions (BCHW)
+        self.detail_mask = self.detail_mask.unsqueeze(0).unsqueeze(0)
         
         # Generate preview noise map with detail mask
-        preview_shape = (1, 1, 512, 512)
+        # Use the actual image dimensions for the preview
+        preview_shape = image.shape
         preview_noise = self.generate_noise_map(preview_shape, detail_mask)
         
         try:

@@ -110,11 +110,9 @@ class NoiseGuidedDiffusion:
     def generate_white_noise(self, h, w):
         return np.random.rand(h, w)
 
-    def generate_noise_map(self, shape):
+    def generate_noise_map(self, h, w, device):
         np.random.seed(self.current_seed)
-        h, w = shape[-2:]
         
-        # Select noise generation method
         if self.current_type == "perlin":
             noise = self.generate_perlin_noise(h, w)
         elif self.current_type == "voronoi":
@@ -123,18 +121,17 @@ class NoiseGuidedDiffusion:
             noise = self.generate_simplex_noise(h, w)
         else:  # white noise
             noise = self.generate_white_noise(h, w)
-
+    
         # Normalize to [0, 1] range
         noise = (noise - noise.min()) / (noise.max() - noise.min())
         
         # Apply scale factor
         noise = noise * self.current_scale
         
-        # Convert to torch tensor
+        # Convert to torch tensor with BCHW format (batch, channel, height, width)
         noise_map = torch.from_numpy(noise).float()
-        if len(shape) > 2:
-            noise_map = noise_map.unsqueeze(0).unsqueeze(0)
-            noise_map = noise_map.expand(shape)
+        noise_map = noise_map.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
+        noise_map = noise_map.to(device)
         
         return noise_map
     

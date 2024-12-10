@@ -149,11 +149,12 @@ class NoiseGuidedDiffusion:
         self.current_type = noise_type
         self.current_octaves = octaves
     
-        # Use default device for preview
+        # Generate the preview noise but don't store it as self.noise_map
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-        # Generate noise map at specified dimensions
         preview_noise = self.generate_noise_map(height, width, device)
+    
+        # Don't store noise_map at all in apply
+        self.noise_map = None
     
         model.set_model_denoise_mask_function(self.forward)
         return (model, preview_noise)
@@ -161,10 +162,11 @@ class NoiseGuidedDiffusion:
     def forward(self, sigma: torch.Tensor, denoise_mask: torch.Tensor, extra_options: dict):
         model = extra_options["model"]
         step_sigmas = extra_options["sigmas"]
+        device = denoise_mask.device
     
-        # Always generate a new noise map for each forward pass, using the current device
+        # Generate noise map matching denoise_mask's shape and device
         h, w = denoise_mask.shape[2:]
-        self.noise_map = self.generate_noise_map(h, w, denoise_mask.device)
+        noise_map = self.generate_noise_map(h, w, device)
     
         sigma_to = model.inner_model.model_sampling.sigma_min
         if step_sigmas[-1] > sigma_to:
@@ -176,9 +178,10 @@ class NoiseGuidedDiffusion:
         current_ts = model.inner_model.model_sampling.timestep(sigma[0])
     
         base_threshold = (current_ts - ts_to) / (ts_from - ts_to)
-        modified_threshold = base_threshold + self.noise_map * (1 - base_threshold)
-    
-        return (denoise_mask >= modified_threshold).to(denoise_mask.dtype)
+        modified_threshold = base_threshold + noise_map * (1 - base_threshold)
+            
+        result = (denoise_mask >= modified_threshold).to(denoise_mask.dtype)
+        return result
 
 NODE_CLASS_MAPPINGS = {
     "NoiseGuidedDiffusion": NoiseGuidedDiffusion,

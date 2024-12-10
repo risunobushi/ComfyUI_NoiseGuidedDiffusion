@@ -135,8 +135,8 @@ class NoiseGuidedDiffusion:
         if len(shape) > 2:
             noise_map = noise_map.unsqueeze(0).unsqueeze(0)
             noise_map = noise_map.expand(shape)
-            
-        return noise_map.to(device=shape.device)
+        
+        return noise_map
     
     def apply(self, model, noise_type, noise_scale, noise_frequency, octaves, seed):
         model = model.clone()
@@ -148,7 +148,10 @@ class NoiseGuidedDiffusion:
         
         # Generate a preview noise map (1-channel, 512x512)
         preview_shape = (1, 1, 512, 512)
-        preview_noise = self.generate_noise_map(torch.Size(preview_shape))
+        preview_noise = self.generate_noise_map(preview_shape)
+        
+        # Ensure preview noise is on the same device as the model
+        preview_noise = preview_noise.to(device=model.device)
         
         model.set_model_denoise_mask_function(self.forward)
         return (model, preview_noise)
@@ -161,6 +164,8 @@ class NoiseGuidedDiffusion:
         if (self.noise_map is None or 
             self.noise_map.shape != denoise_mask.shape):
             self.noise_map = self.generate_noise_map(denoise_mask.shape)
+            # Ensure noise map is on the same device as denoise_mask
+            self.noise_map = self.noise_map.to(device=denoise_mask.device)
         
         # Calculate sigma parameters
         sigma_to = model.inner_model.model_sampling.sigma_min

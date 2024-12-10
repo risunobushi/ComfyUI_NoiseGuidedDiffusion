@@ -30,7 +30,7 @@ class NoiseGuidedDiffusion:
             "seed": ("INT", {
                 "default": 0,
                 "min": 0,
-                "max": 2**32 - 1
+                "max": 0xffffffffffffffff
             })
         }}
     
@@ -110,9 +110,11 @@ class NoiseGuidedDiffusion:
     def generate_white_noise(self, h, w):
         return np.random.rand(h, w)
 
-    def generate_noise_map(self, h, w, device):
+    def generate_noise_map(self, shape):
         np.random.seed(self.current_seed)
+        h, w = shape[-2:]
         
+        # Select noise generation method
         if self.current_type == "perlin":
             noise = self.generate_perlin_noise(h, w)
         elif self.current_type == "voronoi":
@@ -121,17 +123,18 @@ class NoiseGuidedDiffusion:
             noise = self.generate_simplex_noise(h, w)
         else:  # white noise
             noise = self.generate_white_noise(h, w)
-    
+
         # Normalize to [0, 1] range
         noise = (noise - noise.min()) / (noise.max() - noise.min())
         
         # Apply scale factor
         noise = noise * self.current_scale
         
-        # Convert to torch tensor with BCHW format (batch, channel, height, width)
+        # Convert to torch tensor
         noise_map = torch.from_numpy(noise).float()
-        noise_map = noise_map.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
-        noise_map = noise_map.to(device)
+        if len(shape) > 2:
+            noise_map = noise_map.unsqueeze(0).unsqueeze(0)
+            noise_map = noise_map.expand(shape)
         
         return noise_map
     
@@ -142,8 +145,13 @@ class NoiseGuidedDiffusion:
         self.current_freq = noise_frequency
         self.current_type = noise_type
         self.current_octaves = octaves
-    
-        # Determine device
+        
+        # Generate a preview noise map (1-channel, 512x512)
+        preview_shape = (1, 1, 512, 512)
+        preview_noise = self.generate_noise_map(preview_shape)
+        
+        # Instead of using model.device, we'll check the device of an existing tensor
+        # or default to CPU if we can't determine it
         try:
             if hasattr(model, 'model') and hasattr(model.model, 'device'):
                 device = model.model.device
@@ -153,13 +161,13 @@ class NoiseGuidedDiffusion:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         except:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-        # Generate preview noise map (512x512)
-        preview_noise = self.generate_noise_map(512, 512, device)
-    
+        
+        # Move preview noise to the appropriate device
+        preview_noise = preview_noise.to(device)
+        
         model.set_model_denoise_mask_function(self.forward)
         return (model, preview_noise)
-        
+    
     def forward(self, sigma: torch.Tensor, denoise_mask: torch.Tensor, extra_options: dict):
         model = extra_options["model"]
         step_sigmas = extra_options["sigmas"]
@@ -167,8 +175,9 @@ class NoiseGuidedDiffusion:
         # Generate or retrieve noise map
         if (self.noise_map is None or 
             self.noise_map.shape != denoise_mask.shape):
-            h, w = denoise_mask.shape[2:]  # Get height and width from denoise_mask
-            self.noise_map = self.generate_noise_map(h, w, denoise_mask.device)
+            self.noise_map = self.generate_noise_map(denoise_mask.shape)
+            # Ensure noise map is on the same device as denoise_mask
+            self.noise_map = self.noise_map.to(device=denoise_mask.device)
         
         # Calculate sigma parameters
         sigma_to = model.inner_model.model_sampling.sigma_min

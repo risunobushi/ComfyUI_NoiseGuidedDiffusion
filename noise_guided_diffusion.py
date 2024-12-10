@@ -104,12 +104,25 @@ class NoiseGuidedDiffusion:
         
         # Set up model
         model = model.clone()
-        model.set_model_denoise_mask_function(self.forward)
         
-        # Move to appropriate device
-        device = next(model.parameters()).device
+        # Determine device
+        try:
+            if hasattr(model, 'model') and hasattr(model.model, 'device'):
+                device = model.model.device
+            elif hasattr(model, 'inner_model') and hasattr(model.inner_model, 'device'):
+                device = model.inner_model.device
+            else:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        except:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Move tensors to appropriate device
         self.noise_map = self.noise_map.to(device)
         self.detail_mask = self.detail_mask.to(device)
+        noise_map_tensor = noise_map_tensor.to(device)
+        detail_mask_tensor = detail_mask_tensor.to(device)
+        
+        model.set_model_denoise_mask_function(self.forward)
         
         return (model, noise_map_tensor, detail_mask_tensor)
 

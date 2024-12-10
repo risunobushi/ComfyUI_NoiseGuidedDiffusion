@@ -188,9 +188,15 @@ class NoiseGuidedDiffusion:
         return noise
     
     def apply(self, model, image, noise_type, noise_scale, noise_size, 
-             detail_sensitivity, smoothing, white_level, black_level, seed):
-        # [previous code remains the same until noise generation]
+             detail_sensitivity, smoothing, white_level, black_level, seed,
+             detail_attraction=2.0, min_noise=0.1):  # Added new parameters with defaults
+        # Get image dimensions
+        height = image.shape[1]
+        width = image.shape[2]
     
+        # Generate detail mask
+        detail_mask = self.detect_details(image, detail_sensitivity, smoothing)
+        
         # Generate base noise based on selected type
         np.random.seed(seed)
         if noise_type == "perlin":
@@ -202,21 +208,16 @@ class NoiseGuidedDiffusion:
     
         # Normalize base noise to 0-1
         noise = (noise - noise.min()) / (noise.max() - noise.min())
-    
+        
         # Create attraction to plain areas
-        # detail_mask is high (close to 1) in plain areas, low in detailed areas
-        attraction_strength = 2.0  # Adjust this to control how strongly noise is attracted to plain areas
-        detail_influence = np.power(detail_mask, attraction_strength)
-    
+        detail_influence = np.power(detail_mask, detail_attraction)
+        
         # Blend noise based on detail levels
-        # In detailed areas (detail_influence close to 0), noise will be suppre
-        # In plain areas (detail_influence close to 1), noise will be preserved
         weighted_noise = noise * detail_influence
-    
-        # Optional: Add minimum noise level in detailed areas
-        min_noise_level = 0.1  # Adjust this to control minimum noise in detailed areas
-        weighted_noise = min_noise_level + (weighted_noise * (1 - min_noise_level))
-    
+        
+        # Add minimum noise level in detailed areas
+        weighted_noise = min_noise + (weighted_noise * (1 - min_noise))
+        
         # Scale the noise
         weighted_noise = weighted_noise * noise_scale
         

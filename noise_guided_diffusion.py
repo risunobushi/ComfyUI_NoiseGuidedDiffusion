@@ -30,7 +30,7 @@ class NoiseGuidedDiffusion:
             "seed": ("INT", {
                 "default": 0,
                 "min": 0,
-                "max": 0xffffffffffffffff
+                "max": 2**32 - 1
             })
         }}
     

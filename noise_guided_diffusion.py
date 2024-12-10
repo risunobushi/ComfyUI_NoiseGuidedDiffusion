@@ -188,7 +188,7 @@ class NoiseGuidedDiffusion:
         return noise
     
     def apply(self, model, image, noise_type, noise_scale, noise_size, 
-             detail_sensitivity, smoothing, black_level, white_level, seed):
+             detail_sensitivity, smoothing, white_level, black_level, seed):
         # Store levels for use in noise generation
         self.black_level = black_level
         self.white_level = white_level
@@ -218,29 +218,22 @@ class NoiseGuidedDiffusion:
         weighted_noise = weighted_noise * noise_scale
         
         # Apply black/white levels at the final stage
-        black = self.black_level / 255.0
-        white = self.white_level / 255.0
+        w_level = self.white_level / 255.0
+        b_level = self.black_level / 255.0
         
-        # Ensure white level is higher than black level
-        if white <= black:
-            white = black + 0.01
+        # Ensure black level is higher than white level (since we're inverting)
+        if b_level <= w_level:
+            b_level = w_level + 0.01
         
         # Remap the values to the black/white range
-        noise_map = black + (weighted_noise * (white - black))
+        noise_map = w_level + (weighted_noise * (b_level - w_level))
         
-        # Create and store inverted noise map
+        # Create inverted noise map
         inverted_noise_map = 1.0 - noise_map
         
         # Convert masks to torch tensors
         detail_mask_tensor = torch.from_numpy(detail_mask).float().unsqueeze(0)
         noise_map_tensor = torch.from_numpy(inverted_noise_map).float().unsqueeze(0)
-        
-        # Store for later use
-        self.noise_map = noise_map_tensor
-        self.detail_mask = detail_mask_tensor
-        
-        # Set up model
-        model = model.clone()
         
         # Determine device
         try:
@@ -253,12 +246,16 @@ class NoiseGuidedDiffusion:
         except:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Move tensors to appropriate device
-        self.noise_map = self.noise_map.to(device)
-        self.detail_mask = self.detail_mask.to(device)
-        noise_map_tensor = noise_map_tensor.to(device)
+        # Move all tensors to the correct device
         detail_mask_tensor = detail_mask_tensor.to(device)
+        noise_map_tensor = noise_map_tensor.to(device)
         
+        # Store tensors (already on correct device)
+        self.noise_map = noise_map_tensor
+        self.detail_mask = detail_mask_tensor
+        
+        # Set up model
+        model = model.clone()
         model.set_model_denoise_mask_function(self.forward)
         
         return (model, noise_map_tensor, detail_mask_tensor)

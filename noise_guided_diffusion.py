@@ -162,11 +162,9 @@ class NoiseGuidedDiffusion:
         model = extra_options["model"]
         step_sigmas = extra_options["sigmas"]
     
-        # Always use the device from the input tensor
-        if (self.noise_map is None or 
-            self.noise_map.shape != denoise_mask.shape):
-            h, w = denoise_mask.shape[2:]
-            self.noise_map = self.generate_noise_map(h, w, denoise_mask.device)
+        # Always generate a new noise map for each forward pass, using the current device
+        h, w = denoise_mask.shape[2:]
+        self.noise_map = self.generate_noise_map(h, w, denoise_mask.device)
     
         sigma_to = model.inner_model.model_sampling.sigma_min
         if step_sigmas[-1] > sigma_to:

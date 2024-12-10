@@ -1,3 +1,8 @@
+import torch
+import numpy as np
+import cv2
+from scipy.spatial import Voronoi
+
 class NoiseGuidedDiffusion:
     @classmethod
     def INPUT_TYPES(s):

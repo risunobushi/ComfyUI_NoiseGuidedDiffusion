@@ -67,9 +67,7 @@ class NoiseGuidedDiffusion:
         # Convert from torch tensor to numpy array
         if isinstance(image, torch.Tensor):
             image = image.cpu().numpy()
-            # Get first image from batch
             image = image[0]
-            # Image is already in HWC format, just need to scale
             image = (image * 255).astype(np.uint8)
 
         # Convert to grayscale
@@ -78,55 +76,72 @@ class NoiseGuidedDiffusion:
         else:
             gray = image[:, :, 0]
 
-        # Detect edges
-        edges = cv2.Laplacian(gray, cv2.CV_64F)
-        edges = np.absolute(edges)
+        # Detect texture details using multiple methods
+        edges_sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        edges_sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        texture_detail = np.sqrt(edges_sobel_x**2 + edges_sobel_y**2)
         
-        # Normalize edge detection
-        edges = edges / edges.max()
+        # Local variance for detail detection
+        kernel_size = 5
+        local_mean = cv2.blur(gray.astype(float), (kernel_size, kernel_size))
+        local_sqr_mean = cv2.blur(np.square(gray.astype(float)), (kernel_size, kernel_size))
+        local_variance = local_sqr_mean - np.square(local_mean)
+        
+        # Combine detail detection methods
+        detail_mask = texture_detail + local_variance
+        
+        # Normalize
+        detail_mask = detail_mask / detail_mask.max()
         
         # Apply sensitivity
-        edges = np.power(edges, sensitivity)
+        detail_mask = np.power(detail_mask, sensitivity)
         
         # Smooth the result
         sigma = smoothing * 2
-        detail_mask = cv2.GaussianBlur(edges, (0, 0), sigma)
+        detail_mask = cv2.GaussianBlur(detail_mask, (0, 0), sigma)
         
         # Normalize and invert (high values = less detail)
         detail_mask = 1.0 - cv2.normalize(detail_mask, None, 0, 1, cv2.NORM_MINMAX)
         
         return detail_mask
-
+    
     def generate_perlin_noise(self, height, width, noise_size):
-        # Scale dimensions by noise size
-        scaled_h = int(height / noise_size)
-        scaled_w = int(width / noise_size)
+        # Adjust the scale based on noise_size
+        scale = noise_size * 0.1
         
-        # Generate base noise at smaller scale
-        y = np.linspace(0, scaled_h, scaled_h)
-        x = np.linspace(0, scaled_w, scaled_w)
-        x_idx, y_idx = np.meshgrid(x, y)
-        
-        # Add octaves for more natural look
-        noise = np.zeros((scaled_h, scaled_w))
+        # Generate multiple frequencies
+        noise = np.zeros((height, width))
         octaves = 4
         persistence = 0.5
         amplitude = 1.0
+        frequency = 1.0
         
         for _ in range(octaves):
-            phase_x = np.random.rand() * 100
-            phase_y = np.random.rand() * 100
-            noise += amplitude * np.sin(2 * np.pi * (x_idx + phase_x) / 10) * \
-                    np.sin(2 * np.pi * (y_idx + phase_y) / 10)
+            h_period = int(width * scale / frequency)
+            v_period = int(height * scale / frequency)
+            if h_period < 1: h_period = 1
+            if v_period < 1: v_period = 1
+            
+            # Generate base grids
+            x = np.linspace(0, h_period, width)
+            y = np.linspace(0, v_period, height)
+            x_idx, y_idx = np.meshgrid(x, y)
+            
+            # Add random phase shifts
+            phase_x = np.random.rand() * 2 * np.pi
+            phase_y = np.random.rand() * 2 * np.pi
+            
+            # Generate noise layer
+            noise += amplitude * np.sin(x_idx + phase_x) * np.sin(y_idx + phase_y)
+            
+            frequency *= 2
             amplitude *= persistence
         
-        # Resize back to original dimensions
-        noise = cv2.resize(noise, (width, height), interpolation=cv2.INTER_CUBIC)
         return noise
 
     def generate_voronoi_noise(self, height, width, noise_size):
         # Generate fewer points for larger noise
-        num_points = int(max(height, width) / noise_size)
+        num_points = int(max(height, width) / (noise_size * 2))
         points = np.random.rand(num_points, 2)
         points[:, 0] *= width
         points[:, 1] *= height
@@ -135,10 +150,11 @@ class NoiseGuidedDiffusion:
         y, x = np.mgrid[0:height, 0:width]
         noise = np.zeros((height, width))
         
-        # Calculate distances to nearest points
+        # Calculate distances to nearest points with adaptive scaling
+        scale_factor = noise_size * 0.05  # Adjust this factor to control pattern size
         for px, py in points:
             dist = np.sqrt((x - px)**2 + (y - py)**2)
-            noise = np.maximum(noise, 1 / (1 + dist * (0.1 / noise_size)))
+            noise = np.maximum(noise, 1 / (1 + dist * scale_factor))
         
         return noise
 
@@ -170,28 +186,14 @@ class NoiseGuidedDiffusion:
             amplitude *= persistence
         
         return noise
-
-    def apply_levels(self, noise):
-        # Convert levels from 0-255 to 0-1 range
-        black = self.black_level / 255.0
-        white = self.white_level / 255.0
-        
-        # Ensure white level is higher than black level
-        if white <= black:
-            white = black + 0.01
-        
-        # Scale the noise to fit between black and white levels
-        noise = np.clip(noise, 0, 1)  # Ensure noise is in 0-1 range
-        noise = black + noise * (white - black)
-        return noise
-
+    
     def apply(self, model, image, noise_type, noise_scale, noise_size, 
              detail_sensitivity, smoothing, black_level, white_level, seed):
         # Store levels for use in noise generation
         self.black_level = black_level
         self.white_level = white_level
         
-        # Get image dimensions (BHWC format)
+        # Get image dimensions
         height, width = image.shape[1], image.shape[2]
         
         # Generate detail mask
@@ -206,18 +208,29 @@ class NoiseGuidedDiffusion:
         else:  # simplex
             noise = self.generate_simplex_noise(height, width, noise_size)
         
-        # Normalize noise to 0-1 range
+        # Normalize base noise to 0-1
         noise = (noise - noise.min()) / (noise.max() - noise.min())
         
-        # Apply levels adjustment
-        noise = self.apply_levels(noise)
+        # Weight noise by detail mask (more noise in low detail areas)
+        weighted_noise = noise * detail_mask
         
-        # Apply detail mask and scale
-        noise_map = noise * detail_mask * noise_scale
+        # Scale the noise
+        weighted_noise = weighted_noise * noise_scale
         
-        # Convert masks to torch tensors with correct dimensions
-        detail_mask_tensor = torch.from_numpy(detail_mask).float().unsqueeze(0)  # Add batch dimension
-        noise_map_tensor = torch.from_numpy(noise_map).float().unsqueeze(0)      # Add batch dimension
+        # Apply black/white levels at the final stage
+        black = self.black_level / 255.0
+        white = self.white_level / 255.0
+        
+        # Ensure white level is higher than black level
+        if white <= black:
+            white = black + 0.01
+        
+        # Remap the values to the black/white range
+        noise_map = black + (weighted_noise * (white - black))
+        
+        # Convert masks to torch tensors
+        detail_mask_tensor = torch.from_numpy(detail_mask).float().unsqueeze(0)
+        noise_map_tensor = torch.from_numpy(noise_map).float().unsqueeze(0)
         
         # Store for later use
         self.noise_map = noise_map_tensor

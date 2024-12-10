@@ -171,7 +171,7 @@ class NoiseGuidedDiffusion:
         
         return noise
 
-        def apply_levels(self, noise):
+    def apply_levels(self, noise):
         # Convert levels from 0-255 to 0-1 range
         black = self.black_level / 255.0
         white = self.white_level / 255.0

@@ -9,18 +9,6 @@ class NoiseGuidedDiffusion:
         return {"required": {
             "model": ("MODEL",),
             "noise_type": (["perlin", "voronoi", "simplex", "white"],),
-            "width": ("INT", {
-                "default": 512,
-                "min": 16,
-                "max": 32768,
-                "step": 8
-            }),
-            "height": ("INT", {
-                "default": 512,
-                "min": 16,
-                "max": 32768,
-                "step": 8
-            }),
             "noise_scale": ("FLOAT", {
                 "default": 1.0,
                 "min": 0.0,
@@ -42,11 +30,11 @@ class NoiseGuidedDiffusion:
             "seed": ("INT", {
                 "default": 0,
                 "min": 0,
-                "max": 2**32 - 1
+                "max": 0xffffffffffffffff
             })
         }}
     
-    RETURN_TYPES = ("MODEL", "MASK",)
+    RETURN_TYPES = ("MODEL", "MASK",)  # Added MASK for preview
     RETURN_NAMES = ("model", "noise_preview",)
     FUNCTION = "apply"
     CATEGORY = "sampling"
@@ -79,14 +67,17 @@ class NoiseGuidedDiffusion:
         return noise
 
     def generate_voronoi_noise(self, h, w):
+        # Generate random points
         num_points = int(max(h, w) * self.current_freq / 2)
         points = np.random.rand(num_points, 2)
         points[:, 0] *= w
         points[:, 1] *= h
         
+        # Create coordinate grids
         x, y = np.meshgrid(np.arange(w), np.arange(h))
         noise = np.zeros((h, w))
         
+        # Calculate distances to nearest points
         for px, py in points:
             dist = np.sqrt((x - px)**2 + (y - py)**2)
             noise = np.maximum(noise, 1 / (1 + dist * 0.1 * self.current_freq))
@@ -94,6 +85,7 @@ class NoiseGuidedDiffusion:
         return noise
 
     def generate_simplex_noise(self, h, w):
+        # Simple approximation of simplex-like noise
         noise = np.zeros((h, w))
         scale = self.current_freq * 0.1
         
@@ -101,10 +93,12 @@ class NoiseGuidedDiffusion:
             freq = (2 ** octave) * scale
             amplitude = 0.5 ** octave
             
+            # Generate base noise
             x = np.linspace(0, w * freq, w)
             y = np.linspace(0, h * freq, h)
             xx, yy = np.meshgrid(x, y)
             
+            # Add rotated waves
             angles = np.linspace(0, np.pi, 3)
             for angle in angles:
                 rotated_x = xx * np.cos(angle) - yy * np.sin(angle)
@@ -116,9 +110,11 @@ class NoiseGuidedDiffusion:
     def generate_white_noise(self, h, w):
         return np.random.rand(h, w)
 
-    def generate_noise_map(self, h, w, device):
+    def generate_noise_map(self, shape):
         np.random.seed(self.current_seed)
-    
+        h, w = shape[-2:]
+        
+        # Select noise generation method
         if self.current_type == "perlin":
             noise = self.generate_perlin_noise(h, w)
         elif self.current_type == "voronoi":
@@ -126,22 +122,23 @@ class NoiseGuidedDiffusion:
         elif self.current_type == "simplex":
             noise = self.generate_simplex_noise(h, w)
         else:  # white noise
-           noise = self.generate_white_noise(h, w)
+            noise = self.generate_white_noise(h, w)
 
         # Normalize to [0, 1] range
         noise = (noise - noise.min()) / (noise.max() - noise.min())
-    
+        
         # Apply scale factor
         noise = noise * self.current_scale
-    
-        # Convert to torch tensor with BCHW format and move to correct device
+        
+        # Convert to torch tensor
         noise_map = torch.from_numpy(noise).float()
-        noise_map = noise_map.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
-        noise_map = noise_map.to(device)
-    
+        if len(shape) > 2:
+            noise_map = noise_map.unsqueeze(0).unsqueeze(0)
+            noise_map = noise_map.expand(shape)
+        
         return noise_map
-
-    def apply(self, model, noise_type, width, height, noise_scale, noise_frequency, octaves, seed):
+    
+    def apply(self, model, noise_type, noise_scale, noise_frequency, octaves, seed):
         model = model.clone()
         self.current_seed = seed
         self.current_scale = noise_scale
@@ -149,39 +146,58 @@ class NoiseGuidedDiffusion:
         self.current_type = noise_type
         self.current_octaves = octaves
     
-        # Generate the preview noise but don't store it as self.noise_map
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        preview_noise = self.generate_noise_map(height, width, device)
+        # Generate a preview noise map (1-channel, 512x512)
+        preview_shape = (1, 1, 512, 512)
+        preview_noise = self.generate_noise_map(preview_shape)
     
-        # Don't store noise_map at all in apply
-        self.noise_map = None
-    
+        # Instead of using model.device, we'll check the device of an existing tensor
+            # or default to CPU if we can't determine it
+        try:
+            if hasattr(model, 'model') and hasattr(model.model, 'device'):
+                device = model.model.device
+            elif hasattr(model, 'inner_model') and hasattr(model.inner_model, 'device'):
+                device = model.inner_model.device
+            else:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        except:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Move preview noise to the appropriate device
+        preview_noise = preview_noise.to(device)
+        
         model.set_model_denoise_mask_function(self.forward)
         return (model, preview_noise)
-
+        
     def forward(self, sigma: torch.Tensor, denoise_mask: torch.Tensor, extra_options: dict):
         model = extra_options["model"]
         step_sigmas = extra_options["sigmas"]
-        device = denoise_mask.device
-    
-        # Generate noise map matching denoise_mask's shape and device
-        h, w = denoise_mask.shape[2:]
-        noise_map = self.generate_noise_map(h, w, device)
-    
+        
+        # Generate or retrieve noise map
+        if (self.noise_map is None or 
+            self.noise_map.shape != denoise_mask.shape):
+            self.noise_map = self.generate_noise_map(denoise_mask.shape)
+            # Ensure noise map is on the same device as denoise_mask
+            self.noise_map = self.noise_map.to(device=denoise_mask.device)
+        
+        # Calculate sigma parameters
         sigma_to = model.inner_model.model_sampling.sigma_min
         if step_sigmas[-1] > sigma_to:
             sigma_to = step_sigmas[-1]
         sigma_from = step_sigmas[0]
-    
+        
+        # Convert to timesteps
         ts_from = model.inner_model.model_sampling.timestep(sigma_from)
         ts_to = model.inner_model.model_sampling.timestep(sigma_to)
         current_ts = model.inner_model.model_sampling.timestep(sigma[0])
-    
+        
+        # Calculate threshold based on current timestep
         base_threshold = (current_ts - ts_to) / (ts_from - ts_to)
-        modified_threshold = base_threshold + noise_map * (1 - base_threshold)
-            
-        result = (denoise_mask >= modified_threshold).to(denoise_mask.dtype)
-        return result
+        
+        # Modify threshold using noise map
+        modified_threshold = base_threshold + self.noise_map * (1 - base_threshold)
+        
+        # Return binary mask
+        return (denoise_mask >= modified_threshold).to(denoise_mask.dtype)
 
 NODE_CLASS_MAPPINGS = {
     "NoiseGuidedDiffusion": NoiseGuidedDiffusion,

@@ -1,54 +1,42 @@
 import torch
 import numpy as np
+from scipy.spatial import Voronoi
 import cv2
 
 class NoiseGuidedDiffusion:
-    DETAIL_ATTRACTION_STRENGTH = 2.0
-    MIN_NOISE_LEVEL = 0.1
-    KERNEL_SIZE = 5
-    OCTAVES = 4
-    PERSISTENCE = 0.5
-
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
             "model": ("MODEL",),
-            "image": ("IMAGE",),
-            "noise_type": (["perlin", "voronoi", "simplex"],),
+            "noise_type": (["perlin", "voronoi", "simplex", "white"],),
+            "width": ("INT", {
+                "default": 512,
+                "min": 16,
+                "max": 32768,
+                "step": 8
+            }),
+            "height": ("INT", {
+                "default": 512,
+                "min": 16,
+                "max": 32768,
+                "step": 8
+            }),
             "noise_scale": ("FLOAT", {
                 "default": 1.0,
                 "min": 0.0,
                 "max": 10.0,
                 "step": 0.1
             }),
-            "noise_size": ("FLOAT", {
+            "noise_frequency": ("FLOAT", {
                 "default": 1.0,
                 "min": 0.1,
                 "max": 10.0,
                 "step": 0.1
             }),
-            "detail_sensitivity": ("FLOAT", {
-                "default": 1.0,
-                "min": 0.1,
-                "max": 5.0,
-                "step": 0.1
-            }),
-            "smoothing": ("FLOAT", {
-                "default": 1.0,
-                "min": 0.1,
-                "max": 5.0,
-                "step": 0.1
-            }),
-            "white_level": ("INT", {
-                "default": 0,
-                "min": 0,
-                "max": 255,
-                "step": 1
-            }),
-            "black_level": ("INT", {
-                "default": 255,
-                "min": 0,
-                "max": 255,
+            "octaves": ("INT", {
+                "default": 3,
+                "min": 1,
+                "max": 8,
                 "step": 1
             }),
             "seed": ("INT", {
@@ -58,145 +46,112 @@ class NoiseGuidedDiffusion:
             })
         }}
     
-    RETURN_TYPES = ("MODEL", "MASK", "MASK",)
-    RETURN_NAMES = ("model", "noise_map", "detail_mask",)
+    RETURN_TYPES = ("MODEL", "MASK",)
+    RETURN_NAMES = ("model", "noise_preview",)
     FUNCTION = "apply"
     CATEGORY = "sampling"
     
     def __init__(self):
         self.noise_map = None
-        self.detail_mask = None
-        self.black_level = None
-        self.white_level = None
+        self.current_seed = None
+        self.current_scale = None
+        self.current_freq = None
+        self.current_type = None
+        self.current_octaves = None
 
-    def detect_details(self, image, sensitivity, smoothing):
-        if isinstance(image, torch.Tensor):
-            image = image.cpu().numpy()
-            image = image[0]
-            image = (image * 255).astype(np.uint8)
-
-        if image.shape[2] == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image[:, :, 0]
-
-        edges_sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        edges_sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        texture_detail = np.sqrt(edges_sobel_x**2 + edges_sobel_y**2)
+    def generate_perlin_noise(self, h, w):
+        x = np.linspace(0, self.current_freq, w)
+        y = np.linspace(0, self.current_freq, h)
+        xx, yy = np.meshgrid(x, y)
         
-        local_mean = cv2.blur(gray.astype(float), (self.KERNEL_SIZE, self.KERNEL_SIZE))
-        local_sqr_mean = cv2.blur(np.square(gray.astype(float)), (self.KERNEL_SIZE, self.KERNEL_SIZE))
-        local_variance = local_sqr_mean - np.square(local_mean)
-        
-        detail_mask = texture_detail + local_variance
-        detail_mask = detail_mask / detail_mask.max()
-        detail_mask = np.power(detail_mask, sensitivity)
-        
-        sigma = smoothing * 2
-        detail_mask = cv2.GaussianBlur(detail_mask, (0, 0), sigma)
-        detail_mask = 1.0 - cv2.normalize(detail_mask, None, 0, 1, cv2.NORM_MINMAX)
-        
-        return detail_mask
-
-    def generate_perlin_noise(self, height, width, noise_size):
-        scale = noise_size * 0.1
-        noise = np.zeros((height, width))
+        noise = np.zeros((h, w))
         amplitude = 1.0
         frequency = 1.0
         
-        for _ in range(self.OCTAVES):
-            h_period = int(width * scale / frequency)
-            v_period = int(height * scale / frequency)
-            if h_period < 1: h_period = 1
-            if v_period < 1: v_period = 1
-            
-            x = np.linspace(0, h_period, width)
-            y = np.linspace(0, v_period, height)
-            x_idx, y_idx = np.meshgrid(x, y)
-            
-            phase_x = np.random.rand() * 2 * np.pi
-            phase_y = np.random.rand() * 2 * np.pi
-            
-            noise += amplitude * np.sin(x_idx + phase_x) * np.sin(y_idx + phase_y)
+        for _ in range(self.current_octaves):
+            phase_x = np.random.rand() * 100
+            phase_y = np.random.rand() * 100
+            noise += amplitude * np.sin(2 * np.pi * (xx * frequency + phase_x)) * \
+                    np.sin(2 * np.pi * (yy * frequency + phase_y))
+            amplitude *= 0.5
             frequency *= 2
-            amplitude *= self.PERSISTENCE
         
         return noise
 
-    def generate_voronoi_noise(self, height, width, noise_size):
-        num_points = int(max(height, width) / (noise_size * 2))
+    def generate_voronoi_noise(self, h, w):
+        num_points = int(max(h, w) * self.current_freq / 2)
         points = np.random.rand(num_points, 2)
-        points[:, 0] *= width
-        points[:, 1] *= height
+        points[:, 0] *= w
+        points[:, 1] *= h
         
-        y, x = np.mgrid[0:height, 0:width]
-        noise = np.zeros((height, width))
+        x, y = np.meshgrid(np.arange(w), np.arange(h))
+        noise = np.zeros((h, w))
         
-        scale_factor = noise_size * 0.05
         for px, py in points:
             dist = np.sqrt((x - px)**2 + (y - py)**2)
-            noise = np.maximum(noise, 1 / (1 + dist * scale_factor))
+            noise = np.maximum(noise, 1 / (1 + dist * 0.1 * self.current_freq))
         
         return noise
 
-    def generate_simplex_noise(self, height, width, noise_size):
-        freq = 1.0 / noise_size
-        y = np.linspace(0, height * freq, height)
-        x = np.linspace(0, width * freq, width)
-        x_idx, y_idx = np.meshgrid(x, y)
+    def generate_simplex_noise(self, h, w):
+        noise = np.zeros((h, w))
+        scale = self.current_freq * 0.1
         
-        noise = np.zeros((height, width))
-        amplitude = 1.0
-        
-        for i in range(self.OCTAVES):
-            freq = (2 ** i)
-            current_noise = np.zeros((height, width))
+        for octave in range(self.current_octaves):
+            freq = (2 ** octave) * scale
+            amplitude = 0.5 ** octave
+            
+            x = np.linspace(0, w * freq, w)
+            y = np.linspace(0, h * freq, h)
+            xx, yy = np.meshgrid(x, y)
             
             angles = np.linspace(0, np.pi, 3)
             for angle in angles:
-                rotated_x = x_idx * np.cos(angle) - y_idx * np.sin(angle)
-                rotated_y = x_idx * np.sin(angle) + y_idx * np.cos(angle)
-                current_noise += np.sin(2 * np.pi * freq * rotated_x) * np.sin(2 * np.pi * freq * rotated_y)
-            
-            noise += amplitude * current_noise
-            amplitude *= self.PERSISTENCE
+                rotated_x = xx * np.cos(angle) - yy * np.sin(angle)
+                rotated_y = xx * np.sin(angle) + yy * np.cos(angle)
+                noise += amplitude * np.sin(rotated_x + rotated_y)
         
         return noise
 
-    def apply(self, model, image, noise_type, noise_scale, noise_size,
-             detail_sensitivity, smoothing, white_level, black_level, seed):
-        height = image.shape[1]
-        width = image.shape[2]
+    def generate_white_noise(self, h, w):
+        return np.random.rand(h, w)
+
+    def generate_noise_map(self, h, w):
+        np.random.seed(self.current_seed)
         
-        detail_mask = self.detect_details(image, detail_sensitivity, smoothing)
-        
-        np.random.seed(seed)
-        if noise_type == "perlin":
-            noise = self.generate_perlin_noise(height, width, noise_size)
-        elif noise_type == "voronoi":
-            noise = self.generate_voronoi_noise(height, width, noise_size)
-        else:
-            noise = self.generate_simplex_noise(height, width, noise_size)
-        
+        if self.current_type == "perlin":
+            noise = self.generate_perlin_noise(h, w)
+        elif self.current_type == "voronoi":
+            noise = self.generate_voronoi_noise(h, w)
+        elif self.current_type == "simplex":
+            noise = self.generate_simplex_noise(h, w)
+        else:  # white noise
+            noise = self.generate_white_noise(h, w)
+
+        # Normalize to [0, 1] range
         noise = (noise - noise.min()) / (noise.max() - noise.min())
         
-        detail_influence = np.power(detail_mask, self.DETAIL_ATTRACTION_STRENGTH)
-        weighted_noise = noise * detail_influence
-        weighted_noise = self.MIN_NOISE_LEVEL + (weighted_noise * (1.0 - self.MIN_NOISE_LEVEL))
-        weighted_noise = weighted_noise * noise_scale
+        # Apply scale factor
+        noise = noise * self.current_scale
         
-        w_level = white_level / 255.0
-        b_level = black_level / 255.0
+        # Convert to torch tensor with BCHW format
+        noise_map = torch.from_numpy(noise).float()
+        noise_map = noise_map.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
         
-        if b_level <= w_level:
-            b_level = w_level + 0.01
+        return noise_map
+    
+    def apply(self, model, noise_type, width, height, noise_scale, noise_frequency, octaves, seed):
+        model = model.clone()
+        self.current_seed = seed
+        self.current_scale = noise_scale
+        self.current_freq = noise_frequency
+        self.current_type = noise_type
+        self.current_octaves = octaves
         
-        noise_map = w_level + (weighted_noise * (b_level - w_level))
-        inverted_noise_map = 1.0 - noise_map
+        # Generate noise map at specified dimensions
+        preview_noise = self.generate_noise_map(height, width)
         
-        detail_mask_tensor = torch.from_numpy(detail_mask).float().unsqueeze(0)
-        noise_map_tensor = torch.from_numpy(inverted_noise_map).float().unsqueeze(0)
-        
+        # Determine device
         try:
             if hasattr(model, 'model') and hasattr(model.model, 'device'):
                 device = model.model.device
@@ -207,20 +162,21 @@ class NoiseGuidedDiffusion:
         except:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        detail_mask_tensor = detail_mask_tensor.to(device)
-        noise_map_tensor = noise_map_tensor.to(device)
+        # Move preview noise to the appropriate device
+        preview_noise = preview_noise.to(device)
         
-        self.noise_map = noise_map_tensor
-        self.detail_mask = detail_mask_tensor
-        
-        model = model.clone()
         model.set_model_denoise_mask_function(self.forward)
-        
-        return (model, noise_map_tensor, detail_mask_tensor)
+        return (model, preview_noise)
 
     def forward(self, sigma: torch.Tensor, denoise_mask: torch.Tensor, extra_options: dict):
         model = extra_options["model"]
         step_sigmas = extra_options["sigmas"]
+        
+        if (self.noise_map is None or 
+            self.noise_map.shape != denoise_mask.shape):
+            h, w = denoise_mask.shape[2:]  # Get height and width from denoise_mask
+            self.noise_map = self.generate_noise_map(h, w)
+            self.noise_map = self.noise_map.to(device=denoise_mask.device)
         
         sigma_to = model.inner_model.model_sampling.sigma_min
         if step_sigmas[-1] > sigma_to:

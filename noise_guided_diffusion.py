@@ -187,9 +187,8 @@ class NoiseGuidedDiffusion:
         
         return noise
     
-    def apply(self, model, image, noise_type, noise_scale, noise_size, 
-             detail_sensitivity, smoothing, white_level, black_level, seed,
-             detail_attraction=2.0, min_noise=0.1):  # Added new parameters with defaults
+    def apply(self, model, image, noise_type, noise_scale, noise_size,
+             detail_sensitivity, smoothing, white_level, black_level, seed):
         # Get image dimensions
         height = image.shape[1]
         width = image.shape[2]

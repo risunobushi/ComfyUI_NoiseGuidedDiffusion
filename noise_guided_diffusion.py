@@ -224,6 +224,9 @@ class NoiseGuidedDiffusion:
         # Ensure white level is higher than black level
         if white <= black:
             white = black + 0.01
+
+        # Invert the noise map
+        noise_map = 1.0 - noise_map
         
         # Remap the values to the black/white range
         noise_map = black + (weighted_noise * (white - black))

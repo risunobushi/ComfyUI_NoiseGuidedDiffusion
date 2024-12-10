@@ -145,14 +145,26 @@ class NoiseGuidedDiffusion:
         self.current_freq = noise_frequency
         self.current_type = noise_type
         self.current_octaves = octaves
-        
+    
         # Generate a preview noise map (1-channel, 512x512)
         preview_shape = (1, 1, 512, 512)
         preview_noise = self.generate_noise_map(preview_shape)
-        
-        # Ensure preview noise is on the same device as the model
-        preview_noise = preview_noise.to(device=model.device)
-        
+    
+        # Instead of using model.device, we'll check the device of an existing tensor
+        # or default to CPU if we can't determine it
+        try:
+            if hasattr(model, 'model') and hasattr(model.model, 'device'):
+                device = model.model.device
+            elif hasattr(model, 'inner_model') and hasattr(model.inner_model, 'device'):
+                device = model.inner_model.device
+            else:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        except:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+        # Move preview noise to the appropriate device
+        preview_noise = preview_noise.to(device)
+    
         model.set_model_denoise_mask_function(self.forward)
         return (model, preview_noise)
     

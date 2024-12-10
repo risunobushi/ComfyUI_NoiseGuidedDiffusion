@@ -202,3 +202,11 @@ class NoiseGuidedDiffusion:
         modified_threshold = base_threshold + self.noise_map * (1 - base_threshold)
         
         return (denoise_mask >= modified_threshold).to(denoise_mask.dtype)
+        
+NODE_CLASS_MAPPINGS = {
+    "NoiseGuidedDiffusion": NoiseGuidedDiffusion,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "NoiseGuidedDiffusion": "Noise Guided Diffusion",
+}
